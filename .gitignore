@@ -9,9 +9,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Output folder(s)
-# Ignores any folder named 'output'
-output/
 
 # Common IDE/editor configuration folders
 .idea/
