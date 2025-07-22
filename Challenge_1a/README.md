@@ -52,7 +52,93 @@ docker run --rm -v "$(pwd)/input":/app/input:ro -v "$(pwd)/output":/app/output -
 
 ## 6. Solution Architecture
 
-The solution programmatically analyzes a PDF's visual layout. It identifies the title by finding the largest text on the first page. Headings (H1-H3) are detected by mapping the largest font sizes and identifying common numbering patterns (e.g., "2.1"). The logic also merges multi-line headings and filters out noise like page numbers.
+6.1. Title Extraction
+Component: merge_title_on_page1(doc[0])
+
+Logic:
+
+Scans the first page of the PDF.
+Identifies the largest text block as the document title.
+Cleans up noise (e.g., "RFP:", "RSVP:", dashes) using pattern checks.
+
+Validation:
+
+Rejects titles that are non-informative, repetitive, or match headings.
+Ensures title is distinct from any extracted outline headings.
+
+6.2. Outline Extraction
+Component: extract_outline_from_page(page)
+
+Logic:
+
+Parses each PDF page using PyMuPDF (fitz) and extracts all text spans.
+Collects lines along with their font sizes and top positions (Y-coordinates).
+Filters out non-text elements (e.g., images, footers, dates).
+
+6.3. Heading Level Detection
+Sorts all detected font sizes (above a threshold) in descending order.
+
+Assigns:
+
+Largest size → H1
+
+Second-largest → H2
+
+Third-largest → H3
+
+Fourth-largest → H4
+
+6.4 Numbered Section Mapping
+Detects structured numbers like:
+
+"2.1" → H2
+
+"3.5.1" → H3 
+
+Applies additional logic to override based on visual cues.
+
+6.5 Heading Merging
+Purpose: Merge multi-line headings into a single logical block.
+
+Logic:
+
+Uses spatial proximity (within 25 pixels vertically).
+
+Buffers text until the next distinct heading is detected.
+
+Preserves colon-ended titles (e.g., "Training:", "Summary:").
+
+6.6. Filtering & Noise Removal
+Rules Applied:
+
+Skips:
+
+Page numbers (e.g., "Page 3 of 5")
+
+Dates (e.g., "12 JUL 2024")
+
+Emails, short fragments (e.g., "rooms.", "structure")
+
+Filters out repeated headings and heading lines that match the title.
+
+Accepts only valid headings based on:
+
+Length
+
+Capitalization
+
+Punctuation (colons, etc.)
+
+6.7. Single vs Multi-Page Handling
+Single-page PDF:
+
+Extracts only one valid H1 heading, ensuring it's not the title.
+
+Multi-page PDF:
+
+Extracts all valid headings across all pages.
+
+Optionally skips page 0 headings if needed for format consistency.
 
 ## 7. Configuration
 
