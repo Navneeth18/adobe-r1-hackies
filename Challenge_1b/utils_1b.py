@@ -1,183 +1,151 @@
 import fitz  # PyMuPDF
 import re
 import os
-import time
 from concurrent.futures import ThreadPoolExecutor
 from sentence_transformers import SentenceTransformer, util
 import nltk
 from collections import defaultdict
+from tqdm import tqdm
 
 # --- NLTK Setup ---
-# Ensure NLTK data is loaded from the local project directory
 try:
     nltk.data.path.append('./nltk_data')
     from nltk.corpus import stopwords
     from nltk.tokenize import word_tokenize, sent_tokenize
     STOPWORDS = set(stopwords.words("english"))
 except Exception as e:
-    print(f"[CRITICAL_ERROR] Failed to load NLTK data. Please ensure 'nltk_data' folder is present. Error: {e}")
+    print(f"[CRITICAL_ERROR] Failed to load NLTK data: {e}")
     STOPWORDS = set()
 
-class SectionExtractor:
-    """
-    Extracts structured sections from a collection of PDF documents in parallel.
-    A section is defined as a heading and the content that follows it.
-    """
-    def _is_heading(self, text: str, block_font_size: float, common_font_size: float) -> bool:
-        """Heuristically identifies if a line of text is a heading."""
-        if not text or len(text.split()) > 15 or not text[0].isalpha():
-            return False
-        # Condition 1: Larger font size than the most common text size
-        is_larger_font = block_font_size > (common_font_size + 1)
-        # Condition 2: Text is in Title Case or ALL CAPS
-        is_title_case = text.istitle() or text.isupper()
-        # Condition 3: Doesn't end with punctuation typical for a sentence.
-        is_not_sentence = not text.strip().endswith(('.', ':', ';'))
-        
-        return is_larger_font and is_title_case and is_not_sentence
+def _clean_text(text):
+    """A dedicated function to clean text artifacts from PDF extraction."""
+    text = re.sub(r'[\u2022\u25E6\u25CF\ufb00-\ufb04]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-    def _get_common_font_size(self, doc: fitz.Document) -> float:
-        """Finds the most frequent font size, likely representing body text."""
-        sizes = defaultdict(int)
-        for page in doc:
-            for block in page.get_text("dict")["blocks"]:
-                if "lines" in block:
-                    for line in block["lines"]:
-                        for span in line["spans"]:
-                            sizes[round(span["size"])] += 1
-        return max(sizes, key=sizes.get) if sizes else 10.0
+class SectionExtractor:
+    """Final extractor using layout and text-based heuristics, ignoring font metadata."""
+
+    def _is_heading_by_layout(self, text: str) -> bool:
+        """Identifies a heading based on its structure, not its font."""
+        if not text:
+            return False
+            
+        # Rule 1: Headings are short.
+        if len(text.split()) > 12:
+            return False
+            
+        # Rule 2: Headings do not end with sentence-ending punctuation.
+        if text.strip().endswith(('.', '!', '?')):
+            return False
+            
+        # Rule 3: Headings are often in Title Case or ALL CAPS.
+        # This is a very strong signal.
+        if not (text.istitle() or text.isupper()):
+            # Allow for single-word, capitalized headings
+            if len(text.split()) > 1:
+                return False
+        
+        # Rule 4: Headings are typically longer than a single character.
+        if len(text) <= 2:
+            return False
+
+        return True
 
     def _extract_from_single_pdf(self, pdf_path: str) -> list:
-        """Worker function to process one PDF and extract its sections."""
+        doc_name = os.path.basename(pdf_path)
         sections = []
         try:
             doc = fitz.open(pdf_path)
-            common_size = self._get_common_font_size(doc)
             current_heading = "Introduction"
             current_content = []
             heading_page = 1
 
             for page_num, page in enumerate(doc, 1):
-                blocks = page.get_text("dict")["blocks"]
+                # Using 'blocks' gives us paragraphs separated by layout.
+                blocks = page.get_text("blocks")
                 for block in blocks:
-                    if "lines" in block:
-                        block_text = "".join(span["text"] for line in block["lines"] for span in line["spans"]).strip()
-                        # Get the font size of the first span in the block
-                        first_span_size = block["lines"][0]["spans"][0]["size"]
-                        
-                        if self._is_heading(block_text, first_span_size, common_size):
-                            if current_content:
-                                sections.append({
-                                    "title": current_heading,
-                                    "content": " ".join(current_content),
-                                    "source": os.path.basename(pdf_path),
-                                    "page": heading_page
-                                })
-                            current_heading = block_text
-                            current_content = []
-                            heading_page = page_num
-                        else:
-                            current_content.append(block_text)
+                    # block[4] contains the text content of the block
+                    block_text = _clean_text(block[4])
+                    if not block_text:
+                        continue
 
-            if current_content: # Add the last section
+                    # Apply our layout-based heading detection
+                    if self._is_heading_by_layout(block_text):
+                        if current_content:
+                            sections.append({
+                                "title": current_heading,
+                                "content": " ".join(current_content),
+                                "source": doc_name, "page": heading_page
+                            })
+                        
+                        # Start a new section
+                        current_heading = block_text
+                        current_content = []
+                        heading_page = page_num
+                    else:
+                        current_content.append(block_text)
+            
+            # Add the last section after the loop finishes
+            if current_content:
                 sections.append({
                     "title": current_heading, "content": " ".join(current_content),
-                    "source": os.path.basename(pdf_path), "page": heading_page
+                    "source": doc_name, "page": heading_page
                 })
             
-            print(f"  [INFO] Extracted {len(sections)} sections from {os.path.basename(pdf_path)}")
             return sections
         except Exception as e:
-            print(f"  [ERROR] Could not process {os.path.basename(pdf_path)}: {e}")
+            print(f"  [ERROR] Could not process {doc_name}: {e}")
             return []
 
     def extract_parallel(self, pdf_paths: list) -> list:
-        """
-        Public method to launch parallel extraction.
-        Uses ThreadPoolExecutor for I/O and CPU-bound tasks, suitable for varied hardware.
-        """
-        # Use a sensible number of workers for low-end laptops
         max_workers = min(4, os.cpu_count() or 1)
-        print(f"[INFO] Starting parallel section extraction with {max_workers} workers...")
-        
+        sections = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(self._extract_from_single_pdf, pdf_paths))
-        
-        return [section for doc_sections in results for section in doc_sections]
-
+            with tqdm(total=len(pdf_paths), desc="Extracting Sections") as pbar:
+                futures = {executor.submit(self._extract_from_single_pdf, path): path for path in pdf_paths}
+                for future in futures:
+                    result = future.result()
+                    # Filter out empty "Introduction" sections if they have no real content
+                    for section in result:
+                        if section['title'] == 'Introduction' and not section['content'].strip():
+                            continue
+                        sections.append(section)
+                    pbar.update(1)
+        return sections
 
 class RelevanceRanker:
-    """
-    Ranks text sections based on semantic similarity to a query using a transformer model.
-    """
     def __init__(self, model_path='./models/all-MiniLM-L6-v2'):
         self.model_path = model_path
         self.model = None
-
     def load_model(self):
-        """Loads the Sentence Transformer model. Called explicitly to track timing."""
-        try:
-            print("[INFO] Loading embedding model. This may take a moment...")
-            self.model = SentenceTransformer(self.model_path)
-            print("[INFO] Embedding model loaded successfully.")
-        except Exception as e:
-            print(f"[CRITICAL_ERROR] Could not load model from '{self.model_path}'. Ensure the model is downloaded. Error: {e}")
-            raise
-
-    def rank(self, sections: list, query: str, top_k: int = 5) -> list:
-        """Encodes and ranks sections, returning the top_k most relevant."""
-        if not self.model:
-            raise RuntimeError("Model is not loaded. Please call .load_model() first.")
-        if not sections:
-            return []
-
-        print(f"[INFO] Encoding {len(sections)} sections for ranking...")
-        section_contents = [sec.get('content', '') for sec in sections]
-        
-        # Optimized batch encoding for performance
+        try: self.model = SentenceTransformer(self.model_path)
+        except Exception as e: raise IOError(f"Could not load model from '{self.model_path}'.")
+    def rank(self, sections, query, top_k):
+        if not self.model: raise RuntimeError("Model not loaded.")
+        if not sections: return []
+        section_contents = [f"{sec.get('title', '')}. {sec.get('content', '')}" for sec in sections]
         section_embeddings = self.model.encode(section_contents, convert_to_tensor=True, show_progress_bar=True)
         query_embedding = self.model.encode(query, convert_to_tensor=True)
-        
-        # Compute cosine similarity
         cosine_scores = util.cos_sim(query_embedding, section_embeddings)[0]
-        
-        # Pair scores with sections
-        scored_sections = []
         for i, section in enumerate(sections):
             section['relevance_score'] = round(cosine_scores[i].item(), 4)
-            scored_sections.append(section)
-        
-        # Sort by score and return top results
-        ranked_sections = sorted(scored_sections, key=lambda x: x['relevance_score'], reverse=True)
-        return ranked_sections[:top_k]
-
+        return sorted(sections, key=lambda x: x['relevance_score'], reverse=True)[:top_k]
 
 class Summarizer:
-    """
-    Performs extractive summarization on a given text.
-    """
-    def summarize(self, text: str, num_sentences: int = 3) -> str:
-        """Extracts the most important sentences based on word frequency."""
-        if not text or not STOPWORDS:
-            return "Could not summarize text."
-
+    def summarize(self, text, num_sentences=3):
+        cleaned_text = _clean_text(text)
+        if not cleaned_text or not STOPWORDS: return "Content could not be summarized."
         try:
-            sents = sent_tokenize(text)
-            if len(sents) <= num_sentences:
-                return text
-
-            words = word_tokenize(text.lower())
+            sents = sent_tokenize(cleaned_text)
+            if len(sents) <= num_sentences: return cleaned_text
+            words = word_tokenize(cleaned_text.lower())
             freq = defaultdict(int)
             for word in words:
-                if word.isalnum() and word not in STOPWORDS:
-                    freq[word] += 1
-            
+                if word.isalnum() and word not in STOPWORDS: freq[word] += 1
             if not freq: return " ".join(sents[:num_sentences])
-
             scores = {sent: sum(freq[word] for word in word_tokenize(sent.lower()) if word in freq) for sent in sents}
-            
             ranked_sents = sorted(scores.items(), key=lambda x: x[1], reverse=True)
             return " ".join([sent for sent, _ in ranked_sents[:num_sentences]])
-        except Exception as e:
-            print(f"  [WARN] Summarization failed for a section: {e}")
-            return text
+        except Exception:
+            return cleaned_text
