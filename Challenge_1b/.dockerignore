@@ -1,0 +1,23 @@
+# Ignore the Python virtual environment
+venv/
+/venv/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore the git directory
+.git/
+.gitignore
+
+# Ignore IDE-specific files
+.idea/
+.vscode/
+
+# Ignore output files - no need to copy them into the image
+output/
+
+# Ignore other miscellaneous files
+Thumbs.db
