@@ -1,3 +1,4 @@
+
 # Python virtual environments
 # Ignores any folder named 'venv' or '.venv' in any subdirectory
 venv/
@@ -15,6 +16,8 @@ sample_dataset/
 #input/output folders
 input/
 output/
+
+
 
 # Common IDE/editor configuration folders
 .idea/
