@@ -9,6 +9,12 @@ __pycache__/
 *.pyo
 *.pyd
 
+#Reference Folder
+sample_dataset/
+
+#input/output folders
+input/
+output/
 
 # Common IDE/editor configuration folders
 .idea/

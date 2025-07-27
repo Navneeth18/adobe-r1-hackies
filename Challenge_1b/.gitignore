@@ -26,10 +26,17 @@ env/
 # Generated output folder
 output/
 
+#Refernece Folders
+Collection 1/
+Collection 2/
+Collection 3/
+
+input/ 
+
 # OS-specific files
 .DS_Store
 Thumbs.db
 
-# Local helper scripts
-download_assets.py
-summarizer_1b.py
+# # Local helper scripts
+# download_assets.py
+# summarizer_1b.py
